@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 )
 
 // isTorExitNode queries the Tor Project's DNSBL to check whether ip is a
@@ -37,10 +38,8 @@ func isTorExitNode(ctx context.Context, ip net.IP) (bool, error) {
 		return false, fmt.Errorf("tor DNS check: %w", err)
 	}
 
-	for _, addr := range addrs {
-		if addr == "127.0.0.2" {
-			return true, nil
-		}
+	if slices.Contains(addrs, "127.0.0.2") {
+		return true, nil
 	}
 	return false, nil
 }
