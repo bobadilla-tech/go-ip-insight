@@ -12,15 +12,21 @@ import (
 
 func main() {
 	dbPath := flag.String("db", "", "path to IP2Proxy .BIN database file (required)")
+	asnDBPath := flag.String("asn-db", "", "path to MaxMind GeoLite2-ASN .mmdb file (required)")
 	noTorDNS := flag.Bool("no-tor-dns", false, "disable real-time Tor exit-node DNS check")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: ipi -db <database> <ip> [<ip>...]\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: ipi -db <proxy-db> -asn-db <asn-db> <ip> [<ip>...]\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
 	if *dbPath == "" {
 		fmt.Fprintln(os.Stderr, "error: -db flag is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+	if *asnDBPath == "" {
+		fmt.Fprintln(os.Stderr, "error: -asn-db flag is required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -32,6 +38,7 @@ func main() {
 
 	client, err := ipi.New(
 		ipi.WithDatabasePath(*dbPath),
+		ipi.WithASNDatabasePath(*asnDBPath),
 		ipi.WithTorDNSCheck(!*noTorDNS),
 	)
 	if err != nil {
@@ -62,6 +69,9 @@ func printResult(r *ipi.Result) {
 	fmt.Printf("Hosting: %v\n", r.IsHosting)
 	fmt.Printf("Score:   %d\n", r.Score)
 	fmt.Printf("Threat:  %s\n", r.Threat)
+	if r.AsnOrg != "" {
+		fmt.Printf("ASN Org: %s\n", r.AsnOrg)
+	}
 	if r.FraudScore > 0 {
 		fmt.Printf("Fraud:   %d/100\n", r.FraudScore)
 	}

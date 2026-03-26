@@ -75,6 +75,11 @@ type Result struct {
 	// higher. It ranges from 0 (no fraud risk) to 100 (high fraud risk).
 	// Zero means the value is unavailable for the current database tier.
 	FraudScore int
+
+	// AsnOrg is the name of the organisation that owns the Autonomous System
+	// containing the address, as reported by the MaxMind GeoLite2-ASN database
+	// (e.g. "DIGITALOCEAN-ASN"). Empty when the ASN lookup returns no record.
+	AsnOrg string
 }
 
 // Threat scoring weights.
