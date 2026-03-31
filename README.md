@@ -2,11 +2,11 @@
 
 A Go package for IP address intelligence. Given any IPv4 or IPv6 address it
 determines whether the address belongs to a VPN provider, a proxy (public or
-web), a Tor exit node, or a hosting/data-centre range, and derives a
-structured threat level from those signals.
+web), a Tor exit node, or a hosting/data-centre range, derives a structured
+threat level from those signals, and returns geolocation and ASN metadata.
 
 Designed for embedding in backend services: the `Client` is safe for
-concurrent use, all detection runs locally against two bundled binary
+concurrent use, all detection runs locally against three bundled binary
 databases, and the public API is intentionally small.
 
 ---
@@ -35,7 +35,9 @@ databases, and the public API is intentionally small.
 | Public / web proxy | IP2Proxy database (proxy types `PUB`, `WEB`, `RES`) |
 | Tor exit node | IP2Proxy database **+** Tor Project DNSBL |
 | Hosting / data centre | IP2Proxy database (`DCH`) **+** MaxMind GeoLite2-ASN (curated ASN list) |
+| ASN number and route | MaxMind GeoLite2-ASN database |
 | ASN organisation name | MaxMind GeoLite2-ASN database |
+| Country and city | MaxMind GeoLite2-City database |
 | Private / reserved IPs | Built-in RFC range check (no database I/O) |
 | Threat level | Weighted score → `None / Low / Medium / High / Critical` |
 
@@ -74,24 +76,30 @@ alone.
 
 ### 3. MaxMind GeoLite2-ASN lookup
 
-The address is also looked up in the GeoLite2-ASN database, which maps IP
-ranges to their Autonomous System Number (ASN) and organisation name. Two
-things happen here:
+The address is also looked up in the GeoLite2-ASN database using the
+low-level `maxminddb` reader, which additionally returns the **announced
+network prefix** (route) alongside the record. Three things happen here:
 
 **Hosting detection:** `IsHosting` is set to `true` if the IP's ASN appears
 in the package's built-in curated list of known hosting and cloud provider
 ASNs (DigitalOcean, AWS, GCP, Azure, Hetzner, Vultr, OVH, Cloudflare, and
-many others). This catches hosting-range addresses that IP2Proxy does not
-classify as `DCH` — the original motivation for adding this second source.
-The final `IsHosting` flag is the **union** of both databases.
+many others). The final `IsHosting` flag is the **union** of both databases.
 
-**Metadata:** The organisation name of the ASN (e.g. `"DIGITALOCEAN-ASN"`) is
-exposed as `Result.AsnOrg`. This does not affect scoring but provides useful
-context for logging and auditing in backend services.
+**ASN metadata:** The ASN number (e.g. `15169`) and organisation name (e.g.
+`"Google LLC"`) are exposed as `Result.AsnNumber` and `Result.AsnOrg`.
 
-### 4. Tor DNS check (IPv4 only)
+**Route:** The announced network prefix in CIDR notation (e.g. `"8.8.8.0/24"`)
+is exposed as `Result.AsnRoute`.
 
-After both database lookups, if the address has not already been identified as
+### 4. MaxMind GeoLite2-City lookup
+
+The address is looked up in the GeoLite2-City database to obtain the
+full country name, ISO 3166-1 alpha-2 country code, and city name. These are
+exposed as `Result.Country`, `Result.CountryCode`, and `Result.City`.
+
+### 5. Tor DNS check (IPv4 only)
+
+After all database lookups, if the address has not already been identified as
 a Tor exit node and the Tor DNS check is enabled (the default), the package
 queries the Tor Project's authoritative DNSBL:
 
@@ -112,7 +120,7 @@ database result stands — the check is best-effort.
 The Tor DNSBL does not support IPv6. IPv6 Tor exit nodes are detected by the
 databases only.
 
-### 5. Threat scoring
+### 6. Threat scoring
 
 The four boolean flags are combined into a numeric score, which is mapped to a
 named threat level. See [Threat scoring](#threat-scoring) below.
@@ -136,7 +144,7 @@ sufficient for the core detection signals. Higher tiers (PX5+) additionally
 populate the `FraudScore` field in `Result`. A paid `.BIN` file of any tier
 can be dropped in without code changes.
 
-### MaxMind GeoLite2-ASN (secondary — hosting detection + metadata)
+### MaxMind GeoLite2-ASN (secondary — hosting detection + ASN metadata)
 
 **URL:** <https://dev.maxmind.com/geoip/geolite2-free-geolocation-data>
 **License:** Creative Commons Attribution-ShareAlike 4.0
@@ -144,14 +152,27 @@ can be dropped in without code changes.
 **Approximate size:** ~9 MB
 **Update cadence:** Weekly
 
-GeoLite2-ASN maps IP ranges to ASN numbers and organisation names. The package
-uses it for two purposes: detecting hosting providers via a curated ASN list,
-and populating the `AsnOrg` metadata field. The weekly update cadence makes it
-one of the freshest free sources for ASN data.
+GeoLite2-ASN maps IP ranges to ASN numbers, organisation names, and announced
+network prefixes. The package uses it for: detecting hosting providers via a
+curated ASN list, and populating the `AsnNumber`, `AsnOrg`, and `AsnRoute`
+metadata fields. The weekly update cadence makes it one of the freshest free
+sources for ASN data.
 
-The built-in ASN list covers the most widely encountered hosting and cloud
-providers. It will not catch every provider, particularly smaller or newer
-ones. Coverage is deliberately conservative to minimise false positives.
+> **Note:** The GeoLite2-ASN free tier does not include a separate ISP name
+> or a domain field. `ASNInfo.ISP` is set to the same value as `ASNInfo.Org`.
+> `ASNInfo.Domain` is always empty; it requires a paid MaxMind domain database.
+
+### MaxMind GeoLite2-City (geolocation)
+
+**URL:** <https://dev.maxmind.com/geoip/geolite2-free-geolocation-data>
+**License:** Creative Commons Attribution-ShareAlike 4.0
+**Cost:** Free (registration required)
+**Approximate size:** ~70 MB
+**Update cadence:** Weekly
+
+GeoLite2-City maps IP ranges to country and city. The package uses it to
+populate `Result.Country`, `Result.CountryCode`, and `Result.City`. The same
+MaxMind account used for GeoLite2-ASN gives access to this database.
 
 ### Tor Project DNSBL (supplementary — Tor only)
 
@@ -180,9 +201,12 @@ monthly IP2Proxy snapshot. Enabled by default; disable with
    from <https://dev.maxmind.com/geoip/geolite2-free-geolocation-data>.
    Free registration required.
 
-4. **Keep both databases current.** IP2Proxy is updated monthly; GeoLite2-ASN
-   is updated weekly. Schedule periodic downloads and restart the service to
-   load the new files.
+4. **MaxMind GeoLite2-City database.** Download `GeoLite2-City.mmdb` (~70 MB)
+   from the same MaxMind page. Uses the same free account.
+
+5. **Keep all databases current.** IP2Proxy is updated monthly; both MaxMind
+   databases are updated weekly. Schedule periodic downloads and restart the
+   service to load the new files.
 
 ### Install
 
@@ -207,6 +231,7 @@ func main() {
     client, err := ipi.New(
         ipi.WithDatabasePath("/etc/ip2proxy/IP2PROXY-LITE-PX2.BIN"),
         ipi.WithASNDatabasePath("/etc/maxmind/GeoLite2-ASN.mmdb"),
+        ipi.WithCityDatabasePath("/etc/maxmind/GeoLite2-City.mmdb"),
     )
     if err != nil {
         log.Fatal(err)
@@ -222,9 +247,31 @@ func main() {
     fmt.Printf("Proxy:   %v\n", result.IsProxy)
     fmt.Printf("Tor:     %v\n", result.IsTor)
     fmt.Printf("Hosting: %v\n", result.IsHosting)
-    fmt.Printf("ASN Org: %s\n", result.AsnOrg)
     fmt.Printf("Threat:  %s\n", result.Threat)
+    fmt.Printf("ASN:     AS%d\n", result.AsnNumber)
+    fmt.Printf("ASN Org: %s\n", result.AsnOrg)
+    fmt.Printf("Route:   %s\n", result.AsnRoute)
+    fmt.Printf("Country: %s (%s)\n", result.Country, result.CountryCode)
+    fmt.Printf("City:    %s\n", result.City)
 }
+```
+
+#### ASN-focused lookup
+
+Use `CheckASN` / `CheckASNString` when you only need network and ASN
+information without the full threat assessment:
+
+```go
+info, err := client.CheckASNString(context.Background(), "8.8.8.8")
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("ASN:    %s\n", info.ASN)    // AS15169
+fmt.Printf("Org:    %s\n", info.Org)    // Google LLC
+fmt.Printf("ISP:    %s\n", info.ISP)    // Google LLC
+fmt.Printf("Route:  %s\n", info.Route)  // 8.8.8.0/24
+fmt.Printf("Type:   %s\n", info.Type)   // hosting
 ```
 
 #### Disabling the Tor DNS check
@@ -233,6 +280,7 @@ func main() {
 client, err := ipi.New(
     ipi.WithDatabasePath("/etc/ip2proxy/IP2PROXY-LITE-PX2.BIN"),
     ipi.WithASNDatabasePath("/etc/maxmind/GeoLite2-ASN.mmdb"),
+    ipi.WithCityDatabasePath("/etc/maxmind/GeoLite2-City.mmdb"),
     ipi.WithTorDNSCheck(false),
 )
 ```
@@ -246,7 +294,7 @@ defer cancel()
 result, err := client.CheckString(ctx, ipStr)
 ```
 
-The timeout applies to the Tor DNS lookup only. Both database lookups are
+The timeout applies to the Tor DNS lookup only. All database lookups are
 in-memory and are not affected by the context.
 
 ---
@@ -255,20 +303,20 @@ in-memory and are not affected by the context.
 
 ### `New(opts ...Option) (*Client, error)`
 
-Creates a new `Client`. Both `WithDatabasePath` and `WithASNDatabasePath` are
-required. Returns an error if either is missing or if either file cannot be
-opened. When IP2Proxy opens successfully but the ASN database fails, the
-IP2Proxy handle is closed before returning.
+Creates a new `Client`. `WithDatabasePath`, `WithASNDatabasePath`, and
+`WithCityDatabasePath` are all required. Returns an error if any path is
+missing or if any file cannot be opened. Previously opened handles are closed
+before returning on failure.
 
 ### `(*Client) Close()`
 
-Releases the file handles held by both databases. Call when the `Client` is no
-longer needed (typically via `defer`).
+Releases the file handles held by all three databases. Call when the `Client`
+is no longer needed (typically via `defer`).
 
 ### `(*Client) Check(ctx context.Context, ip net.IP) (*Result, error)`
 
-Analyses a `net.IP` value. Returns an error only if the IP is nil, the
-internal representation is invalid, or a database lookup fails.
+Analyses a `net.IP` value and returns the full intelligence result, including
+threat signals, ASN metadata, and geolocation.
 
 Private and reserved addresses return immediately with all flags `false` and
 `Threat` set to `ThreatNone`.
@@ -278,19 +326,54 @@ Private and reserved addresses return immediately with all flags `false` and
 Convenience wrapper around `Check` that accepts an IP address string. Returns
 an error if the string is not a valid IPv4 or IPv6 address.
 
+### `(*Client) CheckASN(ctx context.Context, ip net.IP) (*ASNInfo, error)`
+
+Returns structured ASN and network information for the given IP. Intended for
+dedicated ASN lookup endpoints. Private and reserved addresses return an error
+— they have no meaningful public ASN.
+
+The `Type` field is derived from proxy and ASN signals: `"hosting"`, `"vpn"`,
+`"proxy"`, or `"residential"` (in priority order).
+
+### `(*Client) CheckASNString(ctx context.Context, ipStr string) (*ASNInfo, error)`
+
+Convenience wrapper around `CheckASN` that accepts an IP address string.
+
 ### `Result`
 
 ```go
 type Result struct {
-    IP         net.IP      // 16-byte canonical form
-    IsVPN      bool        // IP2Proxy: proxy type VPN
-    IsProxy    bool        // IP2Proxy: proxy type PUB, WEB, or RES
-    IsTor      bool        // IP2Proxy and/or Tor DNSBL
-    IsHosting  bool        // IP2Proxy DCH or ASN in curated hosting list
-    Score      int         // raw weighted score (see Threat scoring)
-    Threat     ThreatLevel // None / Low / Medium / High / Critical
-    FraudScore int         // 0–100; 0 means unavailable (requires IP2Proxy PX5+)
-    AsnOrg     string      // MaxMind: ASN organisation name; empty if unavailable
+    IP          net.IP      // 16-byte canonical form
+    IsVPN       bool        // IP2Proxy: proxy type VPN
+    IsProxy     bool        // IP2Proxy: proxy type PUB, WEB, or RES
+    IsTor       bool        // IP2Proxy and/or Tor DNSBL
+    IsHosting   bool        // IP2Proxy DCH or ASN in curated hosting list
+    Score       int         // raw weighted score (see Threat scoring)
+    Threat      ThreatLevel // None / Low / Medium / High / Critical
+    FraudScore  int         // 0–100; 0 means unavailable (requires IP2Proxy PX5+)
+    AsnOrg      string      // ASN organisation name (e.g. "Google LLC")
+    AsnNumber   uint        // ASN number (e.g. 15169); 0 if unavailable
+    AsnRoute    string      // announced network prefix (e.g. "8.8.8.0/24")
+    Country     string      // full country name in English (e.g. "United States")
+    CountryCode string      // ISO 3166-1 alpha-2 code (e.g. "US")
+    City        string      // city name in English (e.g. "Mountain View")
+}
+```
+
+### `ASNInfo`
+
+Returned by `CheckASN` / `CheckASNString`. Suitable for direct use in API
+responses.
+
+```go
+type ASNInfo struct {
+    IP     string // queried address (e.g. "8.8.8.8")
+    ASN    string // formatted ASN (e.g. "AS15169"); empty if unavailable
+    Org    string // organisation name (e.g. "Google LLC")
+    ISP    string // ISP name; equals Org with GeoLite2-ASN free tier
+    Domain string // always "" with GeoLite2-ASN free tier
+    Route  string // announced prefix (e.g. "8.8.8.0/24")
+    Type   string // "hosting" | "vpn" | "proxy" | "residential"
 }
 ```
 
@@ -315,6 +398,7 @@ const (
 | --- | --- | --- |
 | `WithDatabasePath(path string)` | *(required)* | Path to the IP2Proxy `.BIN` file |
 | `WithASNDatabasePath(path string)` | *(required)* | Path to the GeoLite2-ASN `.mmdb` file |
+| `WithCityDatabasePath(path string)` | *(required)* | Path to the GeoLite2-City `.mmdb` file |
 | `WithTorDNSCheck(enabled bool)` | `true` | Enable/disable the Tor DNSBL lookup |
 
 ---
@@ -364,7 +448,7 @@ go build -o ipi ./cmd/ipi
 ### Run
 
 ```sh
-ipi -db <proxy-db> -asn-db <asn-db> <ip> [<ip>...]
+ipi -db <proxy-db> -asn-db <asn-db> -city-db <city-db> <ip> [<ip>...]
 ```
 
 ### Flags
@@ -373,6 +457,7 @@ ipi -db <proxy-db> -asn-db <asn-db> <ip> [<ip>...]
 | --- | --- | --- |
 | `-db` | *(required)* | Path to the IP2Proxy `.BIN` database file |
 | `-asn-db` | *(required)* | Path to the GeoLite2-ASN `.mmdb` file |
+| `-city-db` | *(required)* | Path to the GeoLite2-City `.mmdb` file |
 | `-no-tor-dns` | `false` | Disable the Tor DNSBL lookup |
 
 ### Example output
@@ -385,7 +470,11 @@ Tor:     false
 Hosting: true
 Score:   1
 Threat:  Low
+ASN:     AS14061
 ASN Org: DIGITALOCEAN-ASN
+Route:   134.122.0.0/20
+Country: Netherlands (NL)
+City:    Amsterdam
 ---
 IP:      185.220.101.1
 VPN:     false
@@ -394,7 +483,11 @@ Tor:     true
 Hosting: false
 Score:   3
 Threat:  Medium
+ASN:     AS200052
 ASN Org: RETN-AS
+Route:   185.220.100.0/22
+Country: Germany (DE)
+City:    Frankfurt am Main
 ---
 IP:      192.168.1.1
 VPN:     false
@@ -426,7 +519,7 @@ API at query time.
 **Disadvantages:**
 
 - Coverage is frozen at the last database download.
-- Two database files must be managed and refreshed out-of-band.
+- Three database files must be managed and refreshed out-of-band.
 - The free LITE tiers have lower coverage than paid commercial products.
 
 External APIs (e.g. ipinfo.io, IPQualityScore) typically have more up-to-date
@@ -434,14 +527,18 @@ coverage and richer signals, but introduce network latency on every request and
 may have rate-limit and cost implications. This package deliberately prioritises
 offline reliability over coverage breadth.
 
-### Two databases vs. one
+### Three databases vs. one
 
-Using two complementary databases (IP2Proxy + GeoLite2-ASN) produces better
-hosting detection than either alone, at the cost of an additional ~9 MB of
-memory and a second in-memory lookup per `Check` call. The benefit is
-illustrated directly: IP2Proxy marks `134.122.0.1` (DigitalOcean) as "not a
-proxy", while the ASN lookup identifies its ASN (14061) as a known hosting
-provider and sets `IsHosting = true`.
+Using three complementary databases produces richer results than any single
+source: IP2Proxy for threat signals, GeoLite2-ASN for network metadata and
+secondary hosting detection, and GeoLite2-City for geolocation. The cost is an
+additional ~79 MB of memory and two extra in-memory lookups per `Check` call.
+
+### `CheckASN` vs. `Check`
+
+Use `CheckASN` / `CheckASNString` when you only need ASN and network type
+information and do not need threat scoring or geolocation. This saves the city
+database lookup. Use `Check` / `CheckString` for the full picture.
 
 ### Curated ASN list maintenance
 
@@ -477,20 +574,21 @@ A paid `.BIN` file of any tier can be dropped in without code changes.
 
 ### Database I/O
 
-Both databases are loaded into memory at startup. All subsequent lookups are
-in-memory operations with no disk I/O. Typical combined lookup latency for
-both databases is in the low-microsecond range.
+All three databases are loaded into memory at startup. All subsequent lookups
+are in-memory operations with no disk I/O. Typical combined lookup latency for
+all three databases is in the low-microsecond range.
 
 ### Concurrency
 
-`Client` is safe for concurrent use by multiple goroutines. Both the IP2Proxy
-and GeoLite2-ASN libraries are thread-safe.
+`Client` is safe for concurrent use by multiple goroutines. All underlying
+libraries (IP2Proxy, maxminddb, geoip2) are thread-safe.
 
 ### Tor DNS check latency
 
 The Tor DNS check adds one DNS round-trip per `Check` call for non-Tor
 addresses (1–5 ms on a typical cloud instance). If the address is already
-identified as Tor by the database, the check is skipped.
+identified as Tor by the database, the check is skipped. `CheckASN` never
+performs a Tor DNS check.
 
 Mitigations:
 
@@ -512,7 +610,8 @@ Mitigations:
 | --- | --- |
 | IP2Proxy LITE PX2 | ~6 MB |
 | MaxMind GeoLite2-ASN | ~9 MB |
-| **Total** | **~15 MB** |
+| MaxMind GeoLite2-City | ~70 MB |
+| **Total** | **~85 MB** |
 
 ---
 
@@ -538,13 +637,17 @@ Mitigations:
 5. **No residential proxy detection at the LITE tier.** Requires IP2Proxy
    PX10 or higher.
 
-6. **Database reload requires restart.** Both databases are opened once at
+6. **Database reload requires restart.** All databases are opened once at
    `New` time. Loading updated files requires closing and re-creating the
    `Client`.
 
 7. **DNS errors are silently swallowed.** Tor DNSBL failures fall back to the
    database result with no indication in `Result`. A sustained DNS outage
    silently degrades Tor detection to database-only coverage.
+
+8. **No ISP/domain separation with free MaxMind databases.** `ASNInfo.ISP`
+   equals `ASNInfo.Org` and `ASNInfo.Domain` is always empty. A paid MaxMind
+   GeoIP2 ISP or Domain database would provide distinct values.
 
 ---
 
@@ -561,9 +664,9 @@ integrate cleanly.
 
 ### Zero-downtime database reload
 
-The `Client` could watch both database files for changes (using `fsnotify`)
+The `Client` could watch the database files for changes (using `fsnotify`)
 and hot-swap the underlying database handles under a read-write mutex, removing
-the need for a service restart on monthly database updates.
+the need for a service restart on monthly/weekly database updates.
 
 ### IPv6 Tor detection via exit node list
 
@@ -571,3 +674,9 @@ The Tor Project publishes a full exit node list at
 `https://check.torproject.org/torbulkexitlist`. Periodically downloading and
 indexing this list in memory would add IPv6 Tor detection and allow fully
 offline Tor classification with near-real-time freshness.
+
+### ISP and domain data
+
+Upgrading to a paid MaxMind GeoIP2 ISP or Domain database would populate
+`ASNInfo.ISP` with a distinct ISP name (separate from the org) and
+`ASNInfo.Domain` with the primary domain associated with the ASN.

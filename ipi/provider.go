@@ -5,8 +5,9 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/oschwald/geoip2-golang"
 	"github.com/ip2location/ip2proxy-go/v4"
+	"github.com/oschwald/geoip2-golang"
+	"github.com/oschwald/maxminddb-golang"
 )
 
 // ---- IP2Proxy ---------------------------------------------------------------
@@ -74,6 +75,8 @@ func lookupProxy(db *ip2proxy.DB, ip net.IP) (proxyRecord, error) {
 type asnRecord struct {
 	IsHosting bool
 	AsnOrg    string
+	AsnNumber uint
+	AsnRoute  string
 }
 
 // hostingASNs is a curated set of Autonomous System Numbers belonging to
@@ -137,18 +140,79 @@ var hostingASNs = map[uint]struct{}{
 	53667: {},
 }
 
-// lookupASN queries the GeoLite2-ASN database for ip and maps the result to
-// an asnRecord. IsHosting is set when the IP's ASN is in the curated
-// hostingASNs list.
-func lookupASN(db *geoip2.Reader, ip net.IP) (asnRecord, error) {
-	rec, err := db.ASN(ip)
+// rawASNRecord mirrors the fields stored in the GeoLite2-ASN mmdb file.
+type rawASNRecord struct {
+	AutonomousSystemNumber       uint   `maxminddb:"autonomous_system_number"`
+	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
+}
+
+// lookupASN queries the GeoLite2-ASN database for ip using the low-level
+// maxminddb reader so that the announced network prefix (route) is also
+// available. IsHosting is set when the IP's ASN is in the curated hostingASNs
+// list.
+func lookupASN(db *maxminddb.Reader, ip net.IP) (asnRecord, error) {
+	var raw rawASNRecord
+	network, ok, err := db.LookupNetwork(ip, &raw)
 	if err != nil {
 		return asnRecord{}, fmt.Errorf("maxmind ASN lookup: %w", err)
 	}
 
-	_, isHosting := hostingASNs[uint(rec.AutonomousSystemNumber)]
+	if !ok {
+		return asnRecord{}, nil
+	}
+
+	route := ""
+	if network != nil {
+		route = network.String()
+	}
+
+	_, isHosting := hostingASNs[raw.AutonomousSystemNumber]
 	return asnRecord{
 		IsHosting: isHosting,
-		AsnOrg:    rec.AutonomousSystemOrganization,
+		AsnOrg:    raw.AutonomousSystemOrganization,
+		AsnNumber: raw.AutonomousSystemNumber,
+		AsnRoute:  route,
 	}, nil
+}
+
+// ---- MaxMind GeoLite2-City --------------------------------------------------
+
+// cityRecord is an internal representation of a GeoLite2-City lookup result.
+type cityRecord struct {
+	Country     string
+	CountryCode string
+	City        string
+}
+
+// lookupCity queries the GeoLite2-City database for ip and returns the
+// country and city fields in English.
+func lookupCity(db *geoip2.Reader, ip net.IP) (cityRecord, error) {
+	rec, err := db.City(ip)
+	if err != nil {
+		return cityRecord{}, fmt.Errorf("maxmind city lookup: %w", err)
+	}
+
+	city := rec.City.Names["en"]
+	return cityRecord{
+		Country:     rec.Country.Names["en"],
+		CountryCode: rec.Country.IsoCode,
+		City:        city,
+	}, nil
+}
+
+// ---- Helpers ----------------------------------------------------------------
+
+// asnType derives a network type string from the detection signals.
+// Priority: hosting > vpn > proxy > residential.
+func asnType(isHosting, isVPN, isProxy bool) string {
+	switch {
+	case isHosting:
+		return "hosting"
+	case isVPN:
+		return "vpn"
+	case isProxy:
+		return "proxy"
+	default:
+		return "residential"
+	}
 }
