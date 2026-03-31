@@ -7,7 +7,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/bobadilla-tech/go-ip-intelligence/ipi"
+	"github.com/bobadilla-tech/go-ip-intelligence/v2/ipi"
 )
 
 func main() {
