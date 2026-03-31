@@ -1,4 +1,4 @@
-module github.com/bobadilla-tech/go-ip-intelligence
+module github.com/bobadilla-tech/go-ip-intelligence/v2
 
 go 1.26.1
 
