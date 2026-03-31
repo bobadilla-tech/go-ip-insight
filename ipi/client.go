@@ -273,7 +273,7 @@ func (c *Client) CheckASN(ctx context.Context, ip net.IP) (*ASNInfo, error) {
 	}
 
 	if isPrivate(normalized) {
-		return nil, fmt.Errorf("ipi: %s is a private/reserved address; no public ASN available", net.IP(normalized))
+		return &ASNInfo{IP: net.IP(normalized).String()}, nil
 	}
 
 	asnRec, err := lookupASN(c.asnDB, normalized)
